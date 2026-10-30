@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trade_event.v1",
+  "title": "trade_event",
+  "description": "One executed trade, normalized from any source. Breaking changes require a new version file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "schema_version",
+    "source",
+    "asset_class",
+    "symbol",
+    "price",
+    "size",
+    "event_ts",
+    "ingest_ts",
+    "is_backfill"
+  ],
+  "properties": {
+    "event_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "schema_version": {"const": 1},
+    "source": {"enum": ["finnhub", "alpaca", "coinbase"]},
+    "asset_class": {"enum": ["equity", "crypto"]},
+    "symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9.\\-]{0,14}$"},
+    "price": {"type": "number", "exclusiveMinimum": 0},
+    "size": {"type": "number", "exclusiveMinimum": 0},
+    "event_ts": {"type": "integer", "minimum": 946684800000, "description": "Trade time, UTC epoch milliseconds"},
+    "ingest_ts": {"type": "integer", "minimum": 946684800000, "description": "Producer receive time, UTC epoch milliseconds"},
+    "trade_id": {"type": ["string", "null"]},
+    "venue": {"type": ["string", "null"]},
+    "conditions": {"type": ["array", "null"], "items": {"type": "string"}},
+    "is_backfill": {"type": "boolean"}
+  }
+}

@@ -1,0 +1,43 @@
+# Symbol universe. Each live source streams its own list; backfill uses `equities`.
+# Free-tier limits: Finnhub 50 websocket symbols, Alpaca Basic 30 websocket symbols.
+equities:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - AVGO
+  - ORCL
+  - CRM
+  - JPM
+  - BAC
+  - GS
+  - MS
+  - V
+  - MA
+  - PYPL
+  - XOM
+  - CVX
+  - JNJ
+  - UNH
+  - PFE
+  - WMT
+  - COST
+  - HD
+  - KO
+  - DIS
+  - SPY
+  - QQQ
+  - IWM
+
+crypto:
+  - BTC-USD
+  - ETH-USD
+  - SOL-USD
+
+sources:
+  finnhub: equities
+  alpaca: equities
+  coinbase: crypto
