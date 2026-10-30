@@ -17,7 +17,8 @@ import boto3
 from stockstream.common.config import load_universe, settings
 from stockstream.common.events import now_ms
 from stockstream.common.logging_setup import get_logger, log_fields
-from stockstream.producer.kinesis_sink import KinesisSink
+from stockstream.producer.kinesis_sink import KinesisSink, flush_async
+from stockstream.producer.parsers import BAD_TRADES
 from stockstream.producer.ws_client import SourceReader
 
 log = get_logger(__name__)
@@ -45,8 +46,10 @@ def publish_metrics(cloudwatch, readers, last_trade: dict[str, int], sink: Kines
             {"MetricName": "RecordsDropped", "Value": sink.stats.dropped, "Unit": "Count"}]
     for r in readers:
         age = (now - last_trade[r.source]) / 1000 if r.source in last_trade else 86_400
-        data.append({"MetricName": "LastTradeAgeSeconds", "Value": age, "Unit": "Seconds",
-                     "Dimensions": [{"Name": "Source", "Value": r.source}]})
+        dims = [{"Name": "Source", "Value": r.source}]
+        data.append({"MetricName": "LastTradeAgeSeconds", "Value": age, "Unit": "Seconds", "Dimensions": dims})
+        data.append({"MetricName": "BadFrames", "Value": r.parse_failures + BAD_TRADES[r.source],
+                     "Unit": "Count", "Dimensions": dims})
     try:
         cloudwatch.put_metric_data(Namespace="StockStream", MetricData=data)
     except Exception:  # metrics must never take the producer down
@@ -58,7 +61,7 @@ async def main() -> None:
     cfg, universe = settings(), load_universe()
     enabled = [s.strip() for s in os.environ.get("SOURCES", "finnhub,coinbase").split(",") if s.strip()]
     secrets = load_secrets()
-    sink = KinesisSink(boto3.client("kinesis", region_name=cfg.region), cfg.stream_name)
+    sink = KinesisSink(boto3.client("kinesis", region_name=cfg.region), cfg.stream_name, auto_flush=False)
 
     readers = []
     for source in enabled:
@@ -93,13 +96,13 @@ async def main() -> None:
         ticks = 0
         while any(not r._stop.is_set() for r in readers):
             await asyncio.sleep(1)
-            sink.flush()
+            await flush_async(sink)  # boto3 blocks; keep the event loop free for websocket frames
             ticks += 1
             if ticks % 60 == 0:
                 publish_metrics(cloudwatch, readers, last_trade, sink)
 
     await asyncio.gather(flusher(), *(r.run() for r in readers))
-    sink.flush()
+    await flush_async(sink)
 
 
 if __name__ == "__main__":

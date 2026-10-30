@@ -11,7 +11,7 @@ import json
 import subprocess
 import sys
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -26,6 +26,7 @@ from stockstream.stream_processor.handler import classify, lambda_handler
 from tests.conftest import kinesis_event
 
 pytestmark = pytest.mark.chaos
+UTC = timezone.utc
 ROOT = Path(__file__).resolve().parents[2]
 H = 3_600_000
 T0 = 1793282400000  # 2026-10-29 14:00 UTC, 10:00 New York, a Thursday

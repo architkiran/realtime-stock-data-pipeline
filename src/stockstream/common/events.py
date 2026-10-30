@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+import math
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
+
+UTC = timezone.utc  # datetime.UTC needs Python 3.11; Glue Python shell runs 3.9
 
 SCHEMA_VERSION = 1
 SOURCES = ("finnhub", "alpaca", "coinbase")
@@ -79,11 +82,21 @@ def build_event(
 
 
 def schema_errors(event: Any) -> list[str]:
-    """Return human-readable contract violations (empty list = valid)."""
-    return [
+    """Return human-readable contract violations (empty list = valid).
+
+    JSON Schema can't reject NaN or Infinity: Python's json module accepts both, and
+    `NaN <= 0` is False, so `exclusiveMinimum: 0` lets NaN through. Checked explicitly.
+    """
+    errors = [
         f"{'/'.join(map(str, e.absolute_path)) or '<root>'}: {e.message}"
         for e in sorted(validator().iter_errors(event), key=lambda e: list(e.absolute_path))
     ]
+    if isinstance(event, dict):
+        for name in ("price", "size", "event_ts", "ingest_ts"):
+            value = event.get(name)
+            if isinstance(value, float) and not math.isfinite(value):
+                errors.append(f"{name}: {value!r} is not a finite number")
+    return errors
 
 
 def now_ms() -> int:

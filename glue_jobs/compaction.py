@@ -13,7 +13,7 @@ import pandas as pd
 from _common import args
 
 from stockstream.common.markets import NY
-from stockstream.common.storage import list_keys, put_parquet, read_parquet
+from stockstream.common.storage import delete_keys, list_keys, put_parquet, read_parquet
 
 a = args("DATA_BUCKET", "RUN_DATE")
 bucket, s3 = a["DATA_BUCKET"], boto3.client("s3")
@@ -26,5 +26,5 @@ for hour in range(24):
     df = pd.concat([read_parquet(s3, bucket, k) for k in keys], ignore_index=True)
     df = df.sort_values("processed_ts").drop_duplicates("event_id")
     put_parquet(s3, bucket, prefix + f"compacted-{datetime.now():%Y%m%d%H%M%S}.parquet", df)
-    s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in keys]})
+    delete_keys(s3, bucket, keys)  # chunked: DeleteObjects takes at most 1000 keys
     print(f"{prefix}: {len(keys)} files -> 1 ({len(df)} rows)")

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import numpy as np
+
+UTC = timezone.utc  # datetime.UTC needs Python 3.11; Glue Python shell runs 3.9
 
 START_PRICES = {
     "AAPL": 230.0, "MSFT": 420.0, "NVDA": 180.0, "AMZN": 220.0, "GOOGL": 170.0, "META": 590.0,

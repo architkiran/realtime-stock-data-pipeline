@@ -16,6 +16,18 @@ jobs:
       - run: ruff check src tests glue_jobs
       - run: pytest --cov=stockstream --cov-report=term-missing
 
+  glue-runtime:
+    # The Glue jobs run on Python shell 3.9; test them on exactly that runtime and the pinned libraries.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - run: pip install pandas==2.2.3 pyarrow==17.0.0 numpy==1.26.4 pyyaml==6.0.2 jsonschema==4.23.0 boto3 "moto[s3,kinesis]" pytest requests websockets vermin
+      - run: vermin --no-tips --violations -t=3.9- --eval-annotations glue_jobs src/stockstream/aggregations src/stockstream/common src/stockstream/dq
+      - run: pytest tests/unit/test_stats.py tests/chaos -k "not test_02 and not test_04b"
+
   terraform:
     runs-on: ubuntu-latest
     steps:
@@ -23,7 +35,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
       - run: terraform fmt -check -recursive infra
       - run: terraform -chdir=infra init -backend=false
-      - run: touch build-placeholder && mkdir -p build && touch build/stream_processor.zip build/stockstream-0.1.0-py3-none-any.whl
+      - run: mkdir -p build && touch build/stream_processor.zip build/stockstream-0.1.0-py3-none-any.whl
       - run: terraform -chdir=infra validate
 
   secrets:

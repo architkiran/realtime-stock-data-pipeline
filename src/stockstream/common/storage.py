@@ -52,8 +52,15 @@ def read_parquet_prefix(s3, bucket: str, prefix: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def delete_prefix(s3, bucket: str, prefix: str) -> int:
-    keys = list_keys(s3, bucket, prefix)
-    for i in range(0, len(keys), 1000):
-        s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in keys[i : i + 1000]]})
+S3_DELETE_LIMIT = 1000  # DeleteObjects rejects larger requests (moto does not enforce this)
+
+
+def delete_keys(s3, bucket: str, keys: list[str]) -> int:
+    for i in range(0, len(keys), S3_DELETE_LIMIT):
+        chunk = keys[i : i + S3_DELETE_LIMIT]
+        s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True})
     return len(keys)
+
+
+def delete_prefix(s3, bucket: str, prefix: str) -> int:
+    return delete_keys(s3, bucket, list_keys(s3, bucket, prefix))

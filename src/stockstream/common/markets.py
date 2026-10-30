@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
+
+UTC = timezone.utc  # datetime.UTC needs Python 3.11; Glue Python shell runs 3.9
 
 NY = ZoneInfo("America/New_York")
 
@@ -23,6 +25,16 @@ NYSE_HOLIDAYS = {
 }
 
 
+# 13:00 New York early closes (post-market ends 17:00 on these days).
+NYSE_EARLY_CLOSES = {date(2025, 7, 3), date(2025, 11, 28), date(2025, 12, 24), date(2026, 11, 27), date(2026, 12, 24)}
+EARLY_CLOSE = time(13, 0)
+EARLY_POST_CLOSE = time(17, 0)
+
+
+def regular_close(d: date) -> time:
+    return EARLY_CLOSE if d in NYSE_EARLY_CLOSES else REGULAR_CLOSE
+
+
 def to_ny(ts_ms: int) -> datetime:
     return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).astimezone(NY)
 
@@ -36,10 +48,10 @@ def equity_session(ts_ms: int) -> str:
     local = to_ny(ts_ms)
     if not is_trading_day(local.date()):
         return "off_hours"
-    t = local.time()
-    if REGULAR_OPEN <= t < REGULAR_CLOSE:
+    t, d = local.time(), local.date()
+    if REGULAR_OPEN <= t < regular_close(d):
         return "regular"
-    if PRE_OPEN <= t < POST_CLOSE:
+    if PRE_OPEN <= t < (EARLY_POST_CLOSE if d in NYSE_EARLY_CLOSES else POST_CLOSE):
         return "extended"
     return "off_hours"
 
