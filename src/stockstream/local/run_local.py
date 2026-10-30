@@ -90,7 +90,8 @@ class LocalPipeline:
             if not recs:
                 return
             arrival = datetime.fromtimestamp(now / 1000, tz=UTC)
-            key = f"bronze/dt={arrival:%Y-%m-%d}/hour={arrival:%H}/fh-{step_label}-{recs[0]['SequenceNumber'][-10:]}.json.gz"
+            seq_tail = recs[0]["SequenceNumber"][-10:]
+            key = f"bronze/dt={arrival:%Y-%m-%d}/hour={arrival:%H}/fh-{step_label}-{seq_tail}.json.gz"
             put_jsonl_gz(self.s3, self.bucket, key, [json.loads(r["Data"]) for r in recs])
             event = {"Records": [{"kinesis": {"sequenceNumber": r["SequenceNumber"],
                                               "data": base64.b64encode(r["Data"]).decode()}} for r in recs]}

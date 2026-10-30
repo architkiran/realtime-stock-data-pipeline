@@ -1,0 +1,4 @@
+alert_email            = "you@example.com"
+monthly_budget_usd     = 20
+sources                = "finnhub,coinbase"
+producer_desired_count = 0

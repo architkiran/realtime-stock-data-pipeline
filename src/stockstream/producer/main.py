@@ -15,6 +15,7 @@ import signal
 import boto3
 
 from stockstream.common.config import load_universe, settings
+from stockstream.common.events import now_ms
 from stockstream.common.logging_setup import get_logger, log_fields
 from stockstream.producer.kinesis_sink import KinesisSink
 from stockstream.producer.ws_client import SourceReader
@@ -35,6 +36,22 @@ def load_secrets() -> dict:
         return {}
     sm = boto3.client("secretsmanager", region_name=settings().region)
     return json.loads(sm.get_secret_value(SecretId=secret_id)["SecretString"])
+
+
+def publish_metrics(cloudwatch, readers, last_trade: dict[str, int], sink: KinesisSink) -> None:
+    """Freshness and throughput metrics; the freshness alarm watches LastTradeAgeSeconds."""
+    now = now_ms()
+    data = [{"MetricName": "RecordsSent", "Value": sink.stats.sent, "Unit": "Count"},
+            {"MetricName": "RecordsDropped", "Value": sink.stats.dropped, "Unit": "Count"}]
+    for r in readers:
+        age = (now - last_trade[r.source]) / 1000 if r.source in last_trade else 86_400
+        data.append({"MetricName": "LastTradeAgeSeconds", "Value": age, "Unit": "Seconds",
+                     "Dimensions": [{"Name": "Source", "Value": r.source}]})
+    try:
+        cloudwatch.put_metric_data(Namespace="StockStream", MetricData=data)
+    except Exception:  # metrics must never take the producer down
+        log.exception("put_metric_data failed")
+    log_fields(log, "sink stats", **sink.stats.__dict__)
 
 
 async def main() -> None:
@@ -61,11 +78,25 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: [r.stop() for r in readers])
 
+    cloudwatch = boto3.client("cloudwatch", region_name=cfg.region)
+    last_trade: dict[str, int] = {}
+
+    def track(events: list[dict]) -> None:
+        for e in events:
+            last_trade[e["source"]] = max(last_trade.get(e["source"], 0), e["ingest_ts"])
+        sink.add(events)
+
+    for r in readers:
+        r.on_events = track
+
     async def flusher() -> None:
+        ticks = 0
         while any(not r._stop.is_set() for r in readers):
             await asyncio.sleep(1)
             sink.flush()
-            log_fields(log, "sink stats", **sink.stats.__dict__)
+            ticks += 1
+            if ticks % 60 == 0:
+                publish_metrics(cloudwatch, readers, last_trade, sink)
 
     await asyncio.gather(flusher(), *(r.run() for r in readers))
     sink.flush()
