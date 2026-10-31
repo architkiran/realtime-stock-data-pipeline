@@ -8,7 +8,7 @@ they could parse and count the rest, so one weird message can't kill the produce
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from typing import Any
 
 from stockstream.common.events import build_event, iso_to_ms
@@ -32,6 +32,34 @@ def _skip(source: str, trade: Any, exc: Exception) -> None:
         )
 
 
+class LookalikeCounter:
+    """Numbers trades that share (symbol, ms, price, size) within a sliding window of event time.
+
+    Finnhub sends no trade id, so this is the only way to tell two identical-looking prints apart.
+    The window bounds memory; identical prints more than `window_ms` apart can't collide anyway
+    because event_ts is part of the key.
+    """
+
+    def __init__(self, window_ms: int = 60_000) -> None:
+        self.window_ms = window_ms
+        self.counts: Counter = Counter()
+        self.order: deque = deque()
+
+    def next(self, key: tuple, event_ts: int) -> int:
+        while self.order and self.order[0][1] < event_ts - self.window_ms:
+            old, _ = self.order.popleft()
+            self.counts[old] -= 1
+            if self.counts[old] <= 0:
+                del self.counts[old]
+        n = self.counts[key]
+        self.counts[key] += 1
+        self.order.append((key, event_ts))
+        return n
+
+
+FINNHUB_LOOKALIKES = LookalikeCounter()
+
+
 def parse_finnhub(msg: dict[str, Any], ingest_ts: int) -> list[dict]:
     # {"type":"trade","data":[{"s":"AAPL","p":187.3,"v":100,"t":1730300000123,"c":["1","12"]}]}
     if msg.get("type") != "trade":
@@ -46,15 +74,17 @@ def parse_finnhub(msg: dict[str, Any], ingest_ts: int) -> list[dict]:
 
 
 def _finnhub_trade(t: dict, ingest_ts: int) -> dict:
+    symbol, price, size, ts = t["s"], float(t["p"]), float(t["v"]), int(t["t"])
     return build_event(
         source="finnhub",
         asset_class="equity",
-        symbol=t["s"],
-        price=float(t["p"]),
-        size=float(t["v"]),
-        event_ts=int(t["t"]),
+        symbol=symbol,
+        price=price,
+        size=size,
+        event_ts=ts,
         ingest_ts=ingest_ts,
         conditions=[str(c) for c in t["c"]] if t.get("c") else None,
+        occurrence=FINNHUB_LOOKALIKES.next((symbol, ts, price, size), ts),
     )
 
 

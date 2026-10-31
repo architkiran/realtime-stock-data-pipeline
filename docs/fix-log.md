@@ -1,8 +1,8 @@
 # Fix log
 
-Every bug in [bug-log.md](bug-log.md) is fixed in commit `0d674d6` (branch `fix/break-it-bugs`). Each fix is pinned by the chaos test that first exposed the bug, so a regression fails CI.
+BUG-01 to BUG-14 are fixed in commit `0d674d6`, and BUG-15 to BUG-21 (found in the 42-day run and the final review) in the commit after it, all on branch `fix/break-it-bugs`. Each fix is pinned by the chaos test that first exposed the bug, so a regression fails CI.
 
-**After the fixes:** 31 of 31 tests pass on Python 3.13, and the batch-job tests (stats, jobs, DQ, compaction) also pass on Python 3.9 with the exact library versions the Glue jobs install.
+**After the fixes:** 38 of 38 tests pass on Python 3.13, and the batch-job tests (stats, jobs, DQ, compaction) also pass on Python 3.9 with the exact library versions the Glue jobs install.
 
 | ID | Fix in one line | Files |
 |---|---|---|
@@ -20,6 +20,13 @@ Every bug in [bug-log.md](bug-log.md) is fixed in commit `0d674d6` (branch `fix/
 | FIX-12 | All bulk deletes go through a helper that chunks at 1000 keys | `common/storage.py`, `glue_jobs/compaction.py` |
 | FIX-13 | Retry counter resets after every successful page | `backfill/alpaca_backfill.py` |
 | FIX-14 | 3.9-compatible code, pinned Glue libraries, a Python 3.9 CI job | many, `infra/glue.tf`, `.github/workflows/ci.yml` |
+| FIX-15 | Look-alike trades get an occurrence number in their id | `common/events.py`, `producer/parsers.py` |
+| FIX-16 | Movers use each symbol's latest trading day | `sql/analytics/01_top_movers.sql`, `sql/views/views.sql`, dashboard |
+| FIX-17 | `git rm --cached` the `.pyc` files | repo |
+| FIX-18 | Baseline search continues until every symbol in the window is found | `aggregations/jobs.py` |
+| FIX-19 | Config and contract live inside the package; repo-root paths are symlinks | `src/stockstream/config/`, `src/stockstream/contracts/`, `pyproject.toml` |
+| FIX-20 | Topic policy allows CloudWatch and EventBridge, scoped to this account | `infra/monitoring.tf` |
+| FIX-21 | Optional Glue arguments default to `auto` | `infra/glue.tf`, `glue_jobs/` |
 
 ---
 
@@ -91,9 +98,39 @@ Three changes:
 
 1. **Code:** every `datetime.UTC` became `timezone.utc` (aliased as `UTC`). Ruff's `target-version` was lowered to `py39`; ruff's pyupgrade rule had been "fixing" the code back to `datetime.UTC` during the first attempt at this fix, which is how it slipped in originally.
 2. **Libraries:** [Glue's Python shell 3.9 analytics set](https://docs.aws.amazon.com/glue/latest/dg/add-job-python.md) ships pandas 1.4.2. The jobs now install `pandas==2.2.3, pyarrow==17.0.0, numpy==1.26.4, pyyaml==6.0.2, jsonschema==4.23.0` through `--additional-python-modules` (pandas 2.2 is the last line that supports Python 3.9).
-3. **Proof:** a `glue-runtime` CI job installs Python 3.9 with exactly those pins, runs `vermin -t=3.9`, and runs the stats, jobs, DQ, and compaction tests. Locally the same suite passed under Python 3.9.25: 20 passed, 1 skipped.
+3. **Proof:** a `glue-runtime` CI job installs Python 3.9 with exactly those pins, runs `vermin -t=3.9`, and runs the stats, jobs, DQ, and compaction tests. Locally the same suite passed under Python 3.9.25 (21 passed, 1 skipped after the later fixes).
 
 **Remaining risk, documented rather than fixed:** boto3 drops Python 3.9 support from April 29, 2026 (it prints a deprecation warning under 3.9), and AWS recommends migrating off Python shell jobs. The next step is moving the three jobs to a Glue Spark job (Glue 5.0, Python 3.11) or to a container Lambda on a schedule; the job logic is already plain functions in `aggregations/jobs.py`, so only the wrappers change.
+
+## FIX-15: look-alike trades keep distinct ids
+
+`LookalikeCounter` (in `producer/parsers.py`) numbers Finnhub trades that share symbol, millisecond, price, and size within a 60-second window of event time: the first gets occurrence 0, the next 1, and so on. `make_event_id` appends the occurrence only when it is above 0, so every id that existed before the fix is unchanged and existing silver data still deduplicates correctly.
+
+**Tradeoff, stated plainly:** if Finnhub ever re-sent the exact same print, it would now be counted twice. Finnhub has no replay on reconnect, so a re-send is far less likely than two real identical prints; losing real volume was the worse error. Kinesis retries are unaffected, because the id is computed once in the producer and the retried record carries it.
+
+## FIX-16: movers by each symbol's latest day
+
+The query, the `v_top_movers` view, and the dashboard now take each symbol's own latest `trade_date` (the view restricts that to the last 7 days so Athena still prunes partitions). On a weekend the list shows Friday's stock moves next to today's crypto moves, with the date in each row.
+
+## FIX-17: untracked compiled files
+
+`git rm -r --cached` on every tracked `__pycache__` directory. The `.gitignore` entries already existed, so they stay ignored from now on.
+
+## FIX-18: baselines across weekends
+
+`previous_closes` now takes the set of symbols in the window and walks back hour by hour until each one is found, up to 100 hours (Friday 20:00 to Tuesday 04:00 New York after a Monday holiday is 80 hours). The extra reads happen only in the first hourly run after a weekend; on ordinary hours every symbol is found within one or two partitions.
+
+## FIX-19: data files ship inside the package
+
+`symbols.yaml` and `trade_event.v1.json` moved to `src/stockstream/config/` and `src/stockstream/contracts/`, and `package-data` includes both. `config/` and `contracts/` at the repo root are now symlinks, so the paths in the brief and README still work. The Makefile's and Dockerfile's manual copy steps were removed, since every build now gets the files from the package. The new test builds the real wheel and checks its file list.
+
+## FIX-20: alarms can reach the topic
+
+The topic policy now lists `events.amazonaws.com` and `cloudwatch.amazonaws.com`, with an `aws:SourceAccount` condition so no other account's alarms or rules can publish to it. Budgets is not listed because the budget emails its subscribers directly.
+
+## FIX-21: no empty Glue arguments
+
+`--RUN_DATE` defaults to `auto`, which the scripts read as "yesterday, New York time"; a manual rerun passes a real date such as `2026-10-29`.
 
 ---
 

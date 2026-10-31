@@ -2,7 +2,7 @@
 
 A serverless streaming pipeline that collects live trades from three free market-data APIs, validates them against a written data contract in near real time, lands them in an S3 data lake (bronze, silver, gold), computes hourly and daily price statistics, and serves everything through Athena and a Streamlit dashboard.
 
-The whole pipeline also runs on a laptop with no AWS account (`make local`), which is how it is tested. After the first complete build it went through a deliberate break-it phase: **14 bugs found, documented, fixed, and pinned by regression tests** ([bug log](docs/bug-log.md), [fix log](docs/fix-log.md)).
+The whole pipeline also runs on a laptop with no AWS account (`make local`), which is how it is tested. After the first complete build it went through a deliberate break-it phase: **21 bugs found, documented, fixed, and pinned by regression tests** ([bug log](docs/bug-log.md), [fix log](docs/fix-log.md)).
 
 **Stack:** Python, Kinesis Data Streams, Data Firehose, Lambda, S3, Glue, Athena, ECS Fargate, EventBridge Scheduler, CloudWatch, Secrets Manager, Terraform, GitHub Actions, pytest, moto, DuckDB, Streamlit.
 
@@ -82,7 +82,7 @@ docs/                            bug log, fix log, ADRs, runbook
 ```bash
 python -m venv .venv && source .venv/bin/activate
 make install            # pip install -e ".[dev]"
-make test               # 32 tests: unit, integration, end-to-end, chaos
+make test               # 38 tests: unit, integration, end-to-end, chaos
 make local DAYS=5 SCALE=0.5    # simulate 5 days of trades through the whole pipeline
 make query              # run sql/analytics/*.sql with DuckDB over the local lake
 pip install ".[dashboard]" && LAKE_PATH=local_output streamlit run src/stockstream/dashboard/app.py
@@ -111,19 +111,43 @@ Confirm the SNS subscription email, or you won't get alarms. Before deploying, c
 
 **Cost guardrails:** a $20/month AWS Budget with email alerts, 1 provisioned shard (about $11/month), the producer at 0 tasks unless started, Athena's 1 GB per-query scan limit, lifecycle rules on bronze and quarantine, and 1/16-DPU Glue jobs.
 
-**What has and hasn't been verified:** everything in this repo was built and tested without access to AWS or the live APIs. The pipeline logic is tested end to end against moto and in-memory fakes, and the batch jobs are tested on Python 3.9 with the exact library versions Glue installs. The Terraform has not yet been applied to a real account (CI runs `terraform validate`), and the websocket URLs and subscribe messages follow each provider's docs but have not been exercised live. Expect a round of fixes on the first real deploy; record them in the bug log.
+**What has and hasn't been verified:** everything in this repo was built and tested without access to AWS or the live APIs. The pipeline logic is tested end to end against moto and in-memory fakes, and the batch jobs are tested on Python 3.9 with the exact library versions Glue installs. The Terraform has not yet been applied to a real account (the files are parsed with python-hcl2 here and CI runs `terraform validate`, but neither has been run against AWS), and the websocket URLs and subscribe messages follow each provider's docs but have not been exercised live. Expect a round of fixes on the first real deploy; record them in the bug log.
 
 ## Sample results (local simulation)
 
-RESULTS_PLACEHOLDER
+One run of `run_local --start 2026-09-14 --days 42 --scale 0.6` (simulated data, not market data):
+
+| Measure | Value |
+|---|---|
+| Simulated period | 42 days (Sep 14 to Oct 25, 2026), 30 trading days |
+| Trades through the full pipeline | 5,525,420 (about 178,000 per trading day, 15,500 per weekend day) |
+| Records dropped by the producer | 0 (25,930 `PutRecords` calls, 12,096 Lambda batches) |
+| Silver | 569 MB of Parquet in 12,096 files (one per Lambda batch: why nightly compaction exists) |
+| Gold | 17,424 hourly rows, 1,026 daily rows, 15 MB |
+| Data-quality checks | 126 of 126 PASS (3 checks x 42 days) |
+| Wall-clock time | 21.6 minutes on one CPU |
+
+A sanity check on the math: the simulator draws equity prices with 30% annual volatility and crypto with 60%. The pipeline's 20-day annualized volatility for Oct 23 came back at 26 to 28% for stocks and 65 to 77% for crypto, which is what 20 noisy daily samples of those inputs should give.
+
+`sql/analytics/01_top_movers.sql` on Sunday, Oct 25 (after FIX-16; before it, the stocks were missing):
+
+| symbol | asset_class | trade_date | close | return_pct |
+|---|---|---|---|---|
+| SOL-USD | crypto | 2026-10-25 | 220.16 | 3.43 |
+| ETH-USD | crypto | 2026-10-25 | 3887.72 | 3.39 |
+| BTC-USD | crypto | 2026-10-25 | 54031.87 | 3.20 |
+| TSLA | equity | 2026-10-23 | 294.86 | 2.86 |
+| MS | equity | 2026-10-23 | 229.35 | 2.06 |
+
+This run is also where BUG-15 (3 legitimate trades lost to `event_id` collisions), BUG-16 (weekend movers), and BUG-18 (183 missing Monday returns) were found, by checking the outputs instead of trusting green tests.
 
 ## Break it, then fix it
 
-After the first complete build, an adversarial suite (`tests/chaos/test_break_it.py`) attacked every stage: malformed frames, dropped sockets, full-call throttling, NaN prices, late and duplicate data, two feeds for one symbol, midnight boundaries, half days, S3 API limits, rate-limit storms, and the Glue runtime. 14 of 18 tests failed. Highlights:
+After the first complete build, an adversarial suite (`tests/chaos/test_break_it.py`) attacked every stage: malformed frames, dropped sockets, full-call throttling, NaN prices, late and duplicate data, two feeds for one symbol, midnight boundaries, half days, S3 API limits, rate-limit storms, and the Glue runtime. 14 of 18 tests failed. A 42-day full-scale run and a final packaging and infrastructure review then found 7 more (BUG-15 to BUG-21). Highlights:
 
 - **Critical:** equities streamed from two feeds were counted twice in every volume and VWAP (BUG-07).
-- **Critical:** every Glue job would have failed on its first AWS run, because Glue's Python shell is 3.9 and the code used 3.11-only APIs; ruff's auto-upgrade rule had introduced them (BUG-14).
-- **High:** a throttled `PutRecords` call lost the whole batch (BUG-03); one bad websocket frame stopped a source (BUG-01, BUG-02); NaN prices passed the contract because `NaN <= 0` is false (BUG-05).
+- **Critical:** the Glue wheel shipped without its config files (BUG-19), and every Glue job would have failed on its first AWS run anyway, because Glue's Python shell is 3.9 and the code used 3.11-only APIs; ruff's auto-upgrade rule had introduced them (BUG-14).
+- **High:** a throttled `PutRecords` call lost the whole batch (BUG-03); one bad websocket frame stopped a source (BUG-01, BUG-02); NaN prices passed the contract because `NaN <= 0` is false (BUG-05); identical-looking Finnhub prints were deduplicated away as if they were retries (BUG-15).
 
 Each bug's symptom, root cause, impact, and how it could have been spotted are in the [bug log](docs/bug-log.md); each fix and the alternatives considered are in the [fix log](docs/fix-log.md).
 
@@ -133,6 +157,7 @@ Each bug's symptom, root cause, impact, and how it could have been spotted are i
 - Event time and processing time must never be mixed in one comparison (BUG-10 was exactly that).
 - Mocks are not the service: moto skipped the 1,000-key S3 limit and has quadratic Kinesis puts.
 - Test on the runtime you deploy to; a linter's auto-fix broke the Glue runtime.
+- Green tests are not the finish line. Three bugs only showed up by reading the outputs of a long run.
 
 ## Future work
 

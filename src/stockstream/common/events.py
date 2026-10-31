@@ -41,12 +41,20 @@ def validator() -> Draft202012Validator:
     return Draft202012Validator(schema)
 
 
-def make_event_id(source: str, symbol: str, trade_id: str | None, event_ts: int, price: float, size: float) -> str:
-    """Deterministic dedupe key. Same trade from a replay produces the same id."""
+def make_event_id(source: str, symbol: str, trade_id: str | None, event_ts: int, price: float, size: float,
+                  occurrence: int = 0) -> str:
+    """Deterministic dedupe key. Same trade from a replay produces the same id.
+
+    Without a trade id, two genuinely different trades can share symbol, millisecond, price and
+    size (common for algorithmic order slicing). `occurrence` numbers such look-alikes in arrival
+    order (0, 1, 2...) so they keep distinct ids; 0 leaves the original id format unchanged.
+    """
     if trade_id:
         raw = f"{source}|{symbol}|{trade_id}"
     else:
         raw = f"{source}|{symbol}|{event_ts}|{price}|{size}"
+        if occurrence:
+            raw += f"|{occurrence}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -63,9 +71,10 @@ def build_event(
     venue: str | None = None,
     conditions: list[str] | None = None,
     is_backfill: bool = False,
+    occurrence: int = 0,
 ) -> dict[str, Any]:
     return {
-        "event_id": make_event_id(source, symbol, trade_id, event_ts, price, size),
+        "event_id": make_event_id(source, symbol, trade_id, event_ts, price, size, occurrence),
         "schema_version": SCHEMA_VERSION,
         "source": source,
         "asset_class": asset_class,

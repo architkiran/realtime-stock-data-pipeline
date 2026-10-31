@@ -387,3 +387,87 @@ def test_16_write_failure_then_retry_does_not_double_count(aws):
     assert first["batchItemFailures"] and not second["batchItemFailures"]
     silver = read_parquet_prefix(aws["s3"], aws["bucket"], "silver/")
     assert hourly_stats(silver)["volume"].sum() == 80
+
+
+# ---------------------------------------------------------------- found in the 42-day full run
+
+
+def test_17_identical_looking_trades_are_both_kept():
+    """Two real Finnhub prints can share symbol, millisecond, price and size; both are volume."""
+    from stockstream.aggregations.stats import hourly_stats
+    from stockstream.producer import parsers
+    from stockstream.producer.parsers import LookalikeCounter, parse_finnhub
+
+    parsers.FINNHUB_LOOKALIKES = LookalikeCounter()
+    msg = {"type": "trade", "data": [{"s": "AAPL", "p": 230.0, "v": 100, "t": T0},
+                                     {"s": "AAPL", "p": 230.0, "v": 100, "t": T0}]}
+    events = parse_finnhub(msg, T0 + 10)
+    assert len({e["event_id"] for e in events}) == 2
+    assert hourly_stats(silver_rows(events, T0 + 1000)).iloc[0]["volume"] == 200
+    # ...and the first print keeps the original id format, so existing data still dedupes
+    from stockstream.common.events import make_event_id
+    assert events[0]["event_id"] == make_event_id("finnhub", "AAPL", None, T0, 230.0, 100.0)
+
+
+def test_18_top_movers_includes_stocks_on_a_weekend(tmp_path):
+    """On a Sunday only crypto has a bar for 'today'; stocks must still appear with Friday's move."""
+    import duckdb
+
+    rows = pd.DataFrame({"symbol": ["AAPL", "BTC-USD"], "asset_class": ["equity", "crypto"],
+                         "trade_date": [date(2026, 10, 23), date(2026, 10, 25)],
+                         "close": [230.0, 68000.0], "return_1d": [0.05, 0.01]})
+    con = duckdb.connect()
+    con.execute("CREATE SCHEMA stockstream")
+    con.register("daily_df", rows)
+    con.execute("CREATE VIEW stockstream.daily_stats AS SELECT * FROM daily_df")
+    out = con.sql((ROOT / "sql/analytics/01_top_movers.sql").read_text()).df()
+    assert set(out["symbol"]) == {"AAPL", "BTC-USD"}
+
+
+def test_19_mondays_first_hour_has_a_return(aws):
+    """Found by counting NaN returns after the 42-day run: 183 = 33 first-ever hours + 30 stocks x 5 Mondays.
+    Monday 04:00 New York must compare with Friday's last close, 56 hours earlier."""
+    from stockstream.aggregations.jobs import run_hourly
+
+    s3, bucket = aws["s3"], aws["bucket"]
+    fri = int(datetime(2026, 10, 23, 23, 30, tzinfo=UTC).timestamp() * 1000)   # 19:30 New York
+    mon = int(datetime(2026, 10, 26, 8, 30, tzinfo=UTC).timestamp() * 1000)    # 04:30 New York
+    sat = [ev("BTC-USD", 68000, 0.1, fri + h * H, "coinbase", "crypto", trade_id=f"c{h}") for h in range(1, 56)]
+    _write_silver(s3, bucket, [ev(price=100.0, ts=fri, trade_id="f"), *sat], mon, "a")  # now=mon: no future_ts
+    for h in range(0, 58):
+        run_hourly(s3, bucket, datetime.fromtimestamp(fri / 1000, UTC) + timedelta(hours=h + 1, minutes=10), 1)
+    _write_silver(s3, bucket, [ev(price=110.0, ts=mon, trade_id="m")], mon + 1000, "b")
+    run_hourly(s3, bucket, datetime.fromtimestamp(mon / 1000, UTC) + timedelta(hours=1, minutes=10), 1)
+    gold = read_parquet_prefix(s3, bucket, "gold/hourly_stats/dt=2026-10-26/hour=08/")
+    assert gold.iloc[0]["return_vs_prev_close"] == pytest.approx(0.10)
+
+
+# ---------------------------------------------------------------- found in the final packaging review
+
+
+def test_20_glue_wheel_carries_its_config_and_contract(tmp_path):
+    """The Glue jobs import stockstream from a wheel, outside the repo: the wheel must ship its data files."""
+    import zipfile
+
+    subprocess.run([sys.executable, "-m", "pip", "wheel", "-q", "--no-deps", "-w", str(tmp_path), str(ROOT)],
+                   check=True, capture_output=True)
+    names = zipfile.ZipFile(next(tmp_path.glob("*.whl"))).namelist()
+    assert "stockstream/config/symbols.yaml" in names
+    assert "stockstream/contracts/trade_event.v1.json" in names
+
+
+def test_21_sns_topic_policy_still_lets_alarms_and_budgets_publish():
+    """A custom SNS topic policy replaces the default one; it must allow every service that publishes."""
+    hcl2 = pytest.importorskip("hcl2")
+    with open(ROOT / "infra" / "monitoring.tf") as fh:
+        tf = hcl2.load(fh)
+    docs = [blk['"aws_iam_policy_document"'] for blk in tf["data"] if '"aws_iam_policy_document"' in blk]
+    policy = next(d['"sns_events"'] for d in docs if '"sns_events"' in d)
+    principals = {i.strip('"') for st in policy["statement"] for pr in st["principals"] for i in pr["identifiers"]}
+    assert {"events.amazonaws.com", "cloudwatch.amazonaws.com"} <= principals, principals
+
+
+def test_22_glue_job_arguments_are_never_empty_strings():
+    """Glue rejects empty default argument values, so optional arguments need a real sentinel value."""
+    text = (ROOT / "infra" / "glue.tf").read_text()
+    assert '= ""' not in text.split("locals {")[1].split("}\n}")[0]

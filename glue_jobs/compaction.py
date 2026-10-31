@@ -17,7 +17,8 @@ from stockstream.common.storage import delete_keys, list_keys, put_parquet, read
 
 a = args("DATA_BUCKET", "RUN_DATE")
 bucket, s3 = a["DATA_BUCKET"], boto3.client("s3")
-day = a.get("RUN_DATE") or (datetime.now(NY).date() - timedelta(days=1)).isoformat()
+run_date = a.get("RUN_DATE") or "auto"
+day = (datetime.now(NY).date() - timedelta(days=1)).isoformat() if run_date == "auto" else run_date
 for hour in range(24):
     prefix = f"silver/trades/dt={day}/hour={hour:02d}/"
     keys = [k for k in list_keys(s3, bucket, prefix) if k.endswith(".parquet") and "compacted" not in k]

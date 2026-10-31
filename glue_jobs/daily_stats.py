@@ -10,7 +10,8 @@ from stockstream.common.markets import NY
 from stockstream.dq.checks import run_dq
 
 a = args("DATA_BUCKET", "RUN_DATE")
-day = date.fromisoformat(a["RUN_DATE"]) if a.get("RUN_DATE") else datetime.now(NY).date() - timedelta(days=1)
+run_date = a.get("RUN_DATE") or "auto"
+day = datetime.now(NY).date() - timedelta(days=1) if run_date == "auto" else date.fromisoformat(run_date)
 s3 = boto3.client("s3")
 run_daily(s3, a["DATA_BUCKET"], day)
 print(run_dq(s3, a["DATA_BUCKET"], day).to_string())

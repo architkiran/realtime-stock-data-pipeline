@@ -26,7 +26,8 @@ jobs:
           python-version: "3.9"
       - run: pip install pandas==2.2.3 pyarrow==17.0.0 numpy==1.26.4 pyyaml==6.0.2 jsonschema==4.23.0 boto3 "moto[s3,kinesis]" pytest requests websockets vermin
       - run: vermin --no-tips --violations -t=3.9- --eval-annotations glue_jobs src/stockstream/aggregations src/stockstream/common src/stockstream/dq
-      - run: pytest tests/unit/test_stats.py tests/chaos -k "not test_02 and not test_04b"
+      # producer (02, 04b, 17) and SQL (18) tests do not run in Glue, so they are skipped here
+      - run: pytest tests/unit/test_stats.py tests/chaos -k "not test_02 and not test_04b and not test_17 and not test_18"
 
   terraform:
     runs-on: ubuntu-latest

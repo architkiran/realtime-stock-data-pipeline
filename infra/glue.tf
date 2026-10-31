@@ -8,8 +8,9 @@ resource "aws_s3_object" "wheel" {
 locals {
   glue_jobs = {
     hourly-stats = { script = "hourly_stats.py", args = { "--LOOKBACK_HOURS" = "3" } }
-    daily-stats  = { script = "daily_stats.py", args = { "--RUN_DATE" = "" } }
-    compaction   = { script = "compaction.py", args = { "--RUN_DATE" = "" } }
+    # Glue rejects empty argument values; "auto" means "yesterday, New York time".
+    daily-stats = { script = "daily_stats.py", args = { "--RUN_DATE" = "auto" } }
+    compaction  = { script = "compaction.py", args = { "--RUN_DATE" = "auto" } }
   }
   glue_schedules = {
     hourly-stats = "cron(10 * * * ? *)"           # :10 past every hour

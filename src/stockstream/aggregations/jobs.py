@@ -34,17 +34,19 @@ def read_silver_hours(s3, bucket: str, start: datetime, hours: int) -> pd.DataFr
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def previous_closes(s3, bucket: str, before: datetime, search_hours: int = 72) -> dict[str, float]:
-    """Latest gold close per symbol in the hours before `before` (walks back until every symbol is found
-    or `search_hours` is exhausted). Gives the first hour of a recompute window a real baseline."""
+def previous_closes(s3, bucket: str, before: datetime, symbols: set[str],
+                    search_hours: int = 100) -> dict[str, float]:
+    """Latest gold close per symbol before `before`, walking back hour by hour until every symbol in
+    `symbols` is found or `search_hours` runs out. 100 hours covers a long weekend: Friday 20:00 to
+    Tuesday 04:00 New York is 80 hours. Gives the first hour of a recompute window a real baseline."""
     found: dict[str, float] = {}
     for i in range(1, search_hours + 1):
+        if symbols <= found.keys():
+            break
         ts = before - timedelta(hours=i)
         part = read_parquet_prefix(s3, bucket, f"gold/hourly_stats/dt={ts:%Y-%m-%d}/hour={ts:%H}/")
         for symbol, close in zip(part.get("symbol", []), part.get("close", [])):
             found.setdefault(symbol, float(close))
-        if i >= 24 and found:  # past a day back, only keep going while nothing at all was found
-            break
     return found
 
 
@@ -57,7 +59,8 @@ def run_hourly(s3, bucket: str, now: datetime, lookback_hours: int = 3) -> int:
     end = now.replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(hours=lookback_hours)
     trades = read_silver_hours(s3, bucket, start, lookback_hours)
-    stats = hourly_stats(trades, prev_close=previous_closes(s3, bucket, start) if not trades.empty else None)
+    prev = previous_closes(s3, bucket, start, set(trades["symbol"])) if not trades.empty else None
+    stats = hourly_stats(trades, prev_close=prev)
     written = 0
     for dt, h in _hour_prefixes(start, lookback_hours):
         prefix = f"gold/hourly_stats/dt={dt}/hour={h}/"

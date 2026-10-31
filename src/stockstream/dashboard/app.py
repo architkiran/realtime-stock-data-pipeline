@@ -39,7 +39,9 @@ def query(sql: str) -> pd.DataFrame:
 st.set_page_config(page_title="Stock stream", layout="wide")
 st.title("Stock and crypto trade pipeline")
 
-latest_day = query("SELECT max(trade_date) AS d FROM stockstream.daily_stats")["d"].iloc[0]
+# latest equity day: crypto trades on weekends, so the overall max date would hide every stock
+latest_day = query("""SELECT max(trade_date) AS d FROM stockstream.daily_stats
+                      WHERE asset_class = 'equity'""")["d"].iloc[0]
 st.caption(f"Latest stored trading day: {latest_day}")
 
 left, right = st.columns(2)

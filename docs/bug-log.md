@@ -20,6 +20,15 @@
 | BUG-12 | Glue job | Medium | Compaction sends more than 1000 keys to `DeleteObjects` | test_12b |
 | BUG-13 | Backfill | Medium | The 429 retry budget is shared by every page of a day | test_13 |
 | BUG-14 | Deployment | Critical | Glue Python shell runs Python 3.9; the code needs 3.11 | test_14 |
+| BUG-15 | Producer | High | Identical-looking Finnhub trades share an `event_id`, so real volume is deduplicated away | test_17 |
+| BUG-16 | SQL | Medium | "Top movers" shows only crypto on weekends and holidays | test_18 |
+| BUG-17 | Git | Low | `__pycache__/*.pyc` files were committed in the first commit | review |
+| BUG-18 | Aggregation | Medium | Every Monday, the first hourly return for each stock is missing | test_19 |
+| BUG-19 | Packaging | Critical | The Glue wheel ships without `symbols.yaml` and the contract | test_20 |
+| BUG-20 | Monitoring | High | The SNS topic policy blocks CloudWatch alarms from publishing | test_21 |
+| BUG-21 | Glue job | Low (unconfirmed) | Optional Glue arguments default to empty strings | test_22 |
+
+BUG-15 to BUG-18 were found after the fixes, in a 42-day full-scale simulation (5.5 million trades). BUG-19 to BUG-21 were found in a final packaging and infrastructure review. They are logged the same way.
 
 What held up (tests that passed on the first run): a 50,000-event burst flushes in well under a second; DST fall-back on Nov 1, 2026 is classified correctly; an S3 failure halfway through a Lambda batch followed by a retry does not double count in gold (dedupe on `event_id` works); compaction of 1,005 files works on moto (but see BUG-12).
 
@@ -114,3 +123,48 @@ What held up (tests that passed on the first run): a 50,000-event burst flushes 
 - **Root cause:** the code was written and tested on Python 3.13; the Terraform deploys the jobs as `pythonshell` with `python_version = "3.9"`.
 - **Impact:** every Glue job fails on its first run in AWS with `ImportError`. Nothing local or in CI would have caught it.
 - **Lesson:** test against the runtime you deploy to, not the one on your laptop.
+
+## BUG-15: identical-looking Finnhub trades collapse into one
+
+- **Symptom:** the 42-day simulation produced 5,525,420 trades but silver holds 5,525,417 unique `event_id`s. A standalone replay of 5 simulated days found 2 collisions in 891,352 trades, all from Finnhub.
+- **Root cause:** Finnhub sends no trade id, so `event_id` hashes symbol, millisecond, price, and size. Two different prints with all four equal (common when an algorithm slices an order into identical child orders) get the same id, and the in-batch dedupe drops the second one as a "duplicate".
+- **Impact:** volume and trade counts are silently understated. Real feeds collide far more often than the simulator, whose timestamps are random integers.
+- **Why nothing caught it:** the bronze vs silver check counts *unique* `event_id`s on both sides (correctly, so Kinesis retries don't look like gaps), so a collision vanishes from both sides equally. Only comparing produced trades with silver rows exposed it.
+
+## BUG-16: "Top movers" ignores stocks on weekends
+
+- **Symptom:** after the run ended on Sunday Oct 25, `01_top_movers.sql` returned only BTC, ETH, and SOL.
+- **Root cause:** the query filters to `max(trade_date)` across all symbols, and only crypto has a bar on weekends and holidays. The `v_top_movers` view and the dashboard had the same logic.
+- **Impact:** the main analytics query and the dashboard's first panel are empty of stocks two days a week.
+
+## BUG-17: compiled Python files in Git
+
+- **Symptom:** `git ls-files` listed `__pycache__/*.pyc` files.
+- **Root cause:** `.gitignore` was added in the second commit, after the first commit had already tracked them. Ignoring a path does not untrack files that are already tracked.
+- **Impact:** noisy diffs and a repo that looks careless to a reviewer; no runtime effect.
+
+## BUG-18: Monday's first hourly return is missing for every stock
+
+- **Symptom:** after the 42-day run, 183 of 17,424 hourly rows had no `return_vs_prev_close`. 183 = 33 (each symbol's very first hour) + 30 stocks x 5 Mondays.
+- **Root cause:** FIX-08's `previous_closes` stopped walking back after 24 hours as soon as it had found *any* symbol. Crypto trades all weekend, so it always found BTC and stopped, while each stock's last close was 56 hours back (Friday 20:00 to Monday 04:00 New York). Its own docstring said it walked back "until every symbol is found".
+- **Impact:** the Monday-open return, one of the most-watched numbers of the week, is blank in gold and in the correlation query.
+- **Lesson:** a fix needs its own edge cases. The regression test for FIX-08 only covered consecutive hours. The first version of the new test also passed on the buggy code: its crypto rows were stamped with a "now" before their event times, so they were quarantined as `future_ts` and never reached silver.
+
+## BUG-19: the Glue wheel has no config or contract
+
+- **Symptom:** installing the built wheel outside the repo and calling `load_universe()` raises `FileNotFoundError: symbols.yaml not found`. The contract JSON is missing too.
+- **Root cause:** `symbols.yaml` and `trade_event.v1.json` lived at the repo root (`config/`, `contracts/`), outside the Python package, so `package-data` matched nothing. Every test ran from the repo, where the fallback path finds them, so nothing failed.
+- **Impact:** the daily job (which runs the DQ checks) would fail on its first run in Glue. The Lambda and Docker builds only worked because they copied the folders in by hand.
+- **Reproduced locally:** yes, by installing the wheel into a fresh virtual environment and importing from outside the repo.
+
+## BUG-20: CloudWatch alarms can't publish to the alert topic
+
+- **Symptom:** the topic policy in `monitoring.tf` allows only `events.amazonaws.com`.
+- **Root cause:** an SNS topic policy *replaces* the default policy. It was written to let EventBridge deliver Glue failure events and left out CloudWatch, which also publishes to the topic.
+- **Impact:** every alarm in section 9 of the brief would fire into nothing: the runbook would never be triggered. Found by review; this can't be reproduced without AWS, so the test checks the policy document itself.
+
+## BUG-21: empty Glue argument defaults
+
+- **Symptom:** `--RUN_DATE = ""` as a default argument on two Glue jobs.
+- **Root cause:** the scripts treated an empty value as "yesterday".
+- **Impact:** unconfirmed without an AWS account. Empty-valued job arguments are a known source of Glue API validation errors and of `getResolvedOptions` surprises, so this is logged as a low-severity risk and removed rather than tested in AWS.

@@ -70,13 +70,20 @@ resource "aws_cloudwatch_event_target" "glue_failed" {
   arn  = aws_sns_topic.alerts.arn
 }
 
+# A topic policy REPLACES the default one, so every publisher must be listed:
+# EventBridge (Glue failure events) and CloudWatch (alarms). Budgets emails directly.
 data "aws_iam_policy_document" "sns_events" {
   statement {
     actions   = ["sns:Publish"]
     resources = [aws_sns_topic.alerts.arn]
     principals {
       type        = "Service"
-      identifiers = ["events.amazonaws.com"]
+      identifiers = ["events.amazonaws.com", "cloudwatch.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.me.account_id]
     }
   }
 }
