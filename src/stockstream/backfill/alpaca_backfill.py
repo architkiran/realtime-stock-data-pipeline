@@ -82,6 +82,7 @@ def fetch_day(session: requests.Session, limiter: RateLimiter, symbol: str, day:
             limiter.sleep(min(60, 2 ** retries))
             continue
         resp.raise_for_status()
+        retries = 0  # the retry budget is per request, not per day
         body = resp.json()
         trades.extend(body.get("trades") or [])
         page_token = body.get("next_page_token")

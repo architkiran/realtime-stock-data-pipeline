@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+import math
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
+
+UTC = timezone.utc  # datetime.UTC needs Python 3.11; Glue Python shell runs 3.9
 
 SCHEMA_VERSION = 1
 SOURCES = ("finnhub", "alpaca", "coinbase")
@@ -38,12 +41,20 @@ def validator() -> Draft202012Validator:
     return Draft202012Validator(schema)
 
 
-def make_event_id(source: str, symbol: str, trade_id: str | None, event_ts: int, price: float, size: float) -> str:
-    """Deterministic dedupe key. Same trade from a replay produces the same id."""
+def make_event_id(source: str, symbol: str, trade_id: str | None, event_ts: int, price: float, size: float,
+                  occurrence: int = 0) -> str:
+    """Deterministic dedupe key. Same trade from a replay produces the same id.
+
+    Without a trade id, two genuinely different trades can share symbol, millisecond, price and
+    size (common for algorithmic order slicing). `occurrence` numbers such look-alikes in arrival
+    order (0, 1, 2...) so they keep distinct ids; 0 leaves the original id format unchanged.
+    """
     if trade_id:
         raw = f"{source}|{symbol}|{trade_id}"
     else:
         raw = f"{source}|{symbol}|{event_ts}|{price}|{size}"
+        if occurrence:
+            raw += f"|{occurrence}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -60,9 +71,10 @@ def build_event(
     venue: str | None = None,
     conditions: list[str] | None = None,
     is_backfill: bool = False,
+    occurrence: int = 0,
 ) -> dict[str, Any]:
     return {
-        "event_id": make_event_id(source, symbol, trade_id, event_ts, price, size),
+        "event_id": make_event_id(source, symbol, trade_id, event_ts, price, size, occurrence),
         "schema_version": SCHEMA_VERSION,
         "source": source,
         "asset_class": asset_class,
@@ -79,11 +91,21 @@ def build_event(
 
 
 def schema_errors(event: Any) -> list[str]:
-    """Return human-readable contract violations (empty list = valid)."""
-    return [
+    """Return human-readable contract violations (empty list = valid).
+
+    JSON Schema can't reject NaN or Infinity: Python's json module accepts both, and
+    `NaN <= 0` is False, so `exclusiveMinimum: 0` lets NaN through. Checked explicitly.
+    """
+    errors = [
         f"{'/'.join(map(str, e.absolute_path)) or '<root>'}: {e.message}"
         for e in sorted(validator().iter_errors(event), key=lambda e: list(e.absolute_path))
     ]
+    if isinstance(event, dict):
+        for name in ("price", "size", "event_ts", "ingest_ts"):
+            value = event.get(name)
+            if isinstance(value, float) and not math.isfinite(value):
+                errors.append(f"{name}: {value!r} is not a finite number")
+    return errors
 
 
 def now_ms() -> int:

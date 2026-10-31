@@ -12,6 +12,7 @@ T0 = 1793282400000  # 2026-10-29 14:00 UTC = 10:00 New York
 def trades(rows):
     df = pd.DataFrame(rows, columns=["event_id", "symbol", "asset_class", "price", "size", "event_ts"])
     df["session"] = "regular"
+    df["source"] = "finnhub"
     df["processed_ts"] = df["event_ts"]
     return df
 
@@ -43,7 +44,7 @@ def test_return_vs_previous_hour():
 
 def test_daily_rolling_needs_20_days():
     days = pd.date_range("2026-09-01", periods=25, freq="D").date
-    daily = pd.DataFrame({"symbol": "X", "asset_class": "equity", "trade_date": days, "open": 1.0,
+    daily = pd.DataFrame({"symbol": "X", "asset_class": "equity", "source": "finnhub", "trade_date": days, "open": 1.0,
                           "high": 1.0, "low": 1.0, "close": [100 + i for i in range(25)],
                           "volume": [1000.0] * 24 + [5000.0], "trade_count": 1, "vwap": 1.0})
     out = add_rolling(daily)

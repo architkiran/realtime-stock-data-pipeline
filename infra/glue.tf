@@ -8,8 +8,9 @@ resource "aws_s3_object" "wheel" {
 locals {
   glue_jobs = {
     hourly-stats = { script = "hourly_stats.py", args = { "--LOOKBACK_HOURS" = "3" } }
-    daily-stats  = { script = "daily_stats.py", args = { "--RUN_DATE" = "" } }
-    compaction   = { script = "compaction.py", args = { "--RUN_DATE" = "" } }
+    # Glue rejects empty argument values; "auto" means "yesterday, New York time".
+    daily-stats = { script = "daily_stats.py", args = { "--RUN_DATE" = "auto" } }
+    compaction  = { script = "compaction.py", args = { "--RUN_DATE" = "auto" } }
   }
   glue_schedules = {
     hourly-stats = "cron(10 * * * ? *)"           # :10 past every hour
@@ -30,7 +31,6 @@ resource "aws_glue_job" "job" {
   for_each     = local.glue_jobs
   name         = "${var.name}-${each.key}"
   role_arn     = aws_iam_role.glue.arn
-  glue_version = "3.0"
   max_capacity = 0.0625 # Python shell, 1/16 DPU: the cheapest Glue job size
   timeout      = 30
 
@@ -43,7 +43,9 @@ resource "aws_glue_job" "job" {
   default_arguments = merge({
     "--DATA_BUCKET"               = aws_s3_bucket.data.bucket
     "--extra-py-files"            = "s3://${aws_s3_bucket.data.bucket}/${aws_s3_object.wheel.key},s3://${aws_s3_bucket.data.bucket}/artifacts/glue/_common.py"
-    "--additional-python-modules" = "pyyaml,jsonschema"
+    # Python shell 3.9 ships pandas 1.4.2; the stats code needs pandas 2.2 (the last line that supports 3.9).
+    # tests run the same versions under Python 3.9 (see docs/fix-log.md, FIX-14).
+    "--additional-python-modules" = "pandas==2.2.3,pyarrow==17.0.0,numpy==1.26.4,pyyaml==6.0.2,jsonschema==4.23.0"
     "library-set"                 = "analytics"
   }, each.value.args)
 }

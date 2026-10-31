@@ -5,12 +5,12 @@ Each check returns rows of {check, status, detail}; status is PASS, WARN, or FAI
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
 from stockstream.common.config import load_universe
-from stockstream.common.markets import NY, is_trading_day
+from stockstream.common.markets import NY, is_trading_day, regular_close
 from stockstream.common.storage import (
     delete_prefix,
     list_keys,
@@ -18,6 +18,8 @@ from stockstream.common.storage import (
     read_jsonl_gz,
     read_parquet_prefix,
 )
+
+UTC = timezone.utc  # datetime.UTC needs Python 3.11; Glue Python shell runs 3.9
 
 
 def bronze_vs_silver(bronze: pd.DataFrame, silver: pd.DataFrame, quarantined: int, tolerance: float = 0.01) -> dict:
@@ -32,11 +34,12 @@ def bronze_vs_silver(bronze: pd.DataFrame, silver: pd.DataFrame, quarantined: in
 
 
 def missing_equity_hours(silver: pd.DataFrame, day: date) -> dict:
-    """Every equity symbol should trade in every full regular-session hour (10:00 to 15:00 ET)."""
+    """Every equity symbol should trade in every full regular-session hour (10:00 up to the close)."""
     if not is_trading_day(day):
         return {"check": "missing_equity_hours", "status": "PASS", "detail": "not a trading day"}
     universe = load_universe()
-    expected_hours = [datetime(day.year, day.month, day.day, h, tzinfo=NY) for h in range(10, 16)]
+    last_full_hour = regular_close(day).hour  # 16 normally, 13 on half days
+    expected_hours = [datetime(day.year, day.month, day.day, h, tzinfo=NY) for h in range(10, last_full_hour)]
     eq = silver[silver["asset_class"] == "equity"] if not silver.empty else silver
     have = set()
     if not eq.empty:
@@ -59,18 +62,38 @@ def ohlc_sanity(hourly: pd.DataFrame) -> dict:
             "detail": f"{len(bad)} bad rows of {len(hourly)}"}
 
 
-def run_dq(s3, bucket: str, day: date) -> pd.DataFrame:
+def _utc_day_mask(ts: pd.Series, day: date) -> pd.Series:
+    start = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+    return (ts >= start) & (ts < start + 86_400_000)
+
+
+def run_dq(s3, bucket: str, day: date, arrival_slack_hours: int = 6) -> pd.DataFrame:
+    """Reconcile the same set of trades on both sides: everything whose EVENT time falls on `day` (UTC).
+
+    Bronze is partitioned by arrival time, so trades from `day` can sit in the first hours of the
+    next day's bronze; read `arrival_slack_hours` extra, then filter by event time. Silver is
+    partitioned by event time already. Backfill rows come from bronze/backfill/, not the stream,
+    so they are excluded from this stream reconciliation.
+    """
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    bronze_rows, quarantined = [], 0
-    for h in range(0, 30):
+    bronze_rows, quarantine_rows = [], []
+    for h in range(0, 24 + arrival_slack_hours):
         ts = start + timedelta(hours=h)
         dt, hour = ts.strftime("%Y-%m-%d"), ts.strftime("%H")
         for key in list_keys(s3, bucket, f"bronze/dt={dt}/hour={hour}/"):
             bronze_rows.extend(read_jsonl_gz(s3, bucket, key))
         for key in list_keys(s3, bucket, f"quarantine/dt={dt}/hour={hour}/"):
-            quarantined += len(read_jsonl_gz(s3, bucket, key))
+            quarantine_rows.extend(read_jsonl_gz(s3, bucket, key))
+
     bronze = pd.DataFrame(bronze_rows)
-    silver = pd.concat([read_parquet_prefix(s3, bucket, f"silver/trades/dt={day.isoformat()}/")], ignore_index=True)
+    if not bronze.empty and "event_ts" in bronze:
+        bronze = bronze[pd.to_numeric(bronze["event_ts"], errors="coerce").pipe(_utc_day_mask, day)]
+    quarantined = sum(1 for q in quarantine_rows if isinstance(q.get("payload"), dict)
+                      and isinstance(q["payload"].get("event_ts"), (int, float))
+                      and _utc_day_mask(pd.Series([q["payload"]["event_ts"]]), day).iloc[0])
+    silver = read_parquet_prefix(s3, bucket, f"silver/trades/dt={day.isoformat()}/")
+    if not silver.empty:
+        silver = silver[~silver["is_backfill"].astype(bool)]
     hourly = read_parquet_prefix(s3, bucket, f"gold/hourly_stats/dt={day.isoformat()}/")
 
     results = pd.DataFrame([

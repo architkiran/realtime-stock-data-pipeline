@@ -21,10 +21,13 @@ SELECT symbol, dt, sum(price * size) / sum(size) AS vwap, sum(size) AS volume, c
 FROM stockstream.v_recent_trades
 GROUP BY symbol, dt;
 
--- Biggest daily movers in the latest stored day.
+-- Biggest daily movers on each symbol's latest trading day (equities have no weekend bars).
 CREATE OR REPLACE VIEW stockstream.v_top_movers AS
-SELECT symbol, trade_date, close, return_1d
-FROM stockstream.daily_stats
-WHERE dt = (SELECT max(dt) FROM stockstream.daily_stats)
-ORDER BY abs(return_1d) DESC
+SELECT d.symbol, d.asset_class, d.trade_date, d.close, d.return_1d
+FROM stockstream.daily_stats d
+JOIN (SELECT symbol, max(trade_date) AS trade_date FROM stockstream.daily_stats
+      WHERE dt >= date_format(current_date - interval '7' day, '%Y-%m-%d') GROUP BY symbol) l
+  ON d.symbol = l.symbol AND d.trade_date = l.trade_date
+WHERE d.dt >= date_format(current_date - interval '7' day, '%Y-%m-%d')
+ORDER BY abs(d.return_1d) DESC
 LIMIT 10;

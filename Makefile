@@ -31,7 +31,7 @@ build-lambda: ## zip the stream processor (pandas/pyarrow come from the managed 
 	rm -rf build/lambda && mkdir -p build/lambda
 	$(PY) -m pip install --target build/lambda --no-deps jsonschema jsonschema-specifications referencing rpds-py attrs pyyaml \
 		--platform manylinux2014_aarch64 --only-binary=:all: --python-version 3.12
-	cp -r src/stockstream build/lambda/ && cp -r config contracts build/lambda/stockstream/
+	cp -r src/stockstream build/lambda/
 	cd build/lambda && zip -qr ../stream_processor.zip . -x '*/__pycache__/*'
 
 build-wheel: ## wheel for the Glue jobs

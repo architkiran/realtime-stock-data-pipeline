@@ -78,7 +78,14 @@ class SourceReader:
                     log_fields(log, "connected", source=self.source, symbols=len(self.symbols))
                     async for raw in ws:
                         self.messages_seen += 1
-                        events = parser(json.loads(raw), now_ms())
+                        try:
+                            events = parser(json.loads(raw), now_ms())
+                        except Exception as exc:  # a bad frame must never stop the stream
+                            self.parse_failures += 1
+                            if self.parse_failures <= 20 or self.parse_failures % 1000 == 0:
+                                log_fields(log, "unparseable frame", source=self.source, error=repr(exc),
+                                           frame=str(raw)[:300], total=self.parse_failures)
+                            continue
                         if events:
                             result = self.on_events(events)
                             if asyncio.iscoroutine(result):

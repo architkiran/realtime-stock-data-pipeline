@@ -78,7 +78,8 @@ def classify(events: list[tuple[str, dict]], now: int) -> tuple[list[dict], list
 
         row = {k: event.get(k) for k in SILVER_COLUMNS if k in event}
         row["session"] = equity_session(event["event_ts"]) if event["asset_class"] == "equity" else "continuous"
-        row["late"] = event["event_ts"] < watermark
+        # "late" means a live record that arrived after the watermark; backfill is old by design
+        row["late"] = (not event["is_backfill"]) and event["event_ts"] < watermark
         row["suspect_price"] = suspect
         row["processed_ts"] = now
         valid.append(row)

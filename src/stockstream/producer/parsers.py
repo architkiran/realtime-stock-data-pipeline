@@ -8,9 +8,56 @@ they could parse and count the rest, so one weird message can't kill the produce
 
 from __future__ import annotations
 
+from collections import Counter, deque
 from typing import Any
 
 from stockstream.common.events import build_event, iso_to_ms
+from stockstream.common.logging_setup import get_logger, log_fields
+
+log = get_logger(__name__)
+BAD_TRADES: Counter = Counter()  # per source; the producer publishes this as a metric
+PARSE_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
+
+
+def _skip(source: str, trade: Any, exc: Exception) -> None:
+    BAD_TRADES[source] += 1
+    if BAD_TRADES[source] <= 20 or BAD_TRADES[source] % 1000 == 0:  # don't flood the logs
+        log_fields(
+            log,
+            "skipped malformed trade",
+            source=source,
+            error=repr(exc),
+            trade=str(trade)[:300],
+            total_skipped=BAD_TRADES[source],
+        )
+
+
+class LookalikeCounter:
+    """Numbers trades that share (symbol, ms, price, size) within a sliding window of event time.
+
+    Finnhub sends no trade id, so this is the only way to tell two identical-looking prints apart.
+    The window bounds memory; identical prints more than `window_ms` apart can't collide anyway
+    because event_ts is part of the key.
+    """
+
+    def __init__(self, window_ms: int = 60_000) -> None:
+        self.window_ms = window_ms
+        self.counts: Counter = Counter()
+        self.order: deque = deque()
+
+    def next(self, key: tuple, event_ts: int) -> int:
+        while self.order and self.order[0][1] < event_ts - self.window_ms:
+            old, _ = self.order.popleft()
+            self.counts[old] -= 1
+            if self.counts[old] <= 0:
+                del self.counts[old]
+        n = self.counts[key]
+        self.counts[key] += 1
+        self.order.append((key, event_ts))
+        return n
+
+
+FINNHUB_LOOKALIKES = LookalikeCounter()
 
 
 def parse_finnhub(msg: dict[str, Any], ingest_ts: int) -> list[dict]:
@@ -19,19 +66,26 @@ def parse_finnhub(msg: dict[str, Any], ingest_ts: int) -> list[dict]:
         return []
     events = []
     for t in msg.get("data") or []:
-        events.append(
-            build_event(
-                source="finnhub",
-                asset_class="equity",
-                symbol=t["s"],
-                price=float(t["p"]),
-                size=float(t["v"]),
-                event_ts=int(t["t"]),
-                ingest_ts=ingest_ts,
-                conditions=[str(c) for c in t["c"]] if t.get("c") else None,
-            )
-        )
+        try:
+            events.append(_finnhub_trade(t, ingest_ts))
+        except PARSE_ERRORS as exc:
+            _skip("finnhub", t, exc)
     return events
+
+
+def _finnhub_trade(t: dict, ingest_ts: int) -> dict:
+    symbol, price, size, ts = t["s"], float(t["p"]), float(t["v"]), int(t["t"])
+    return build_event(
+        source="finnhub",
+        asset_class="equity",
+        symbol=symbol,
+        price=price,
+        size=size,
+        event_ts=ts,
+        ingest_ts=ingest_ts,
+        conditions=[str(c) for c in t["c"]] if t.get("c") else None,
+        occurrence=FINNHUB_LOOKALIKES.next((symbol, ts, price, size), ts),
+    )
 
 
 def parse_alpaca(msg: list[dict[str, Any]] | dict[str, Any], ingest_ts: int) -> list[dict]:
@@ -40,23 +94,28 @@ def parse_alpaca(msg: list[dict[str, Any]] | dict[str, Any], ingest_ts: int) -> 
     items = msg if isinstance(msg, list) else [msg]
     events = []
     for t in items:
-        if t.get("T") != "t":
-            continue
-        events.append(
-            build_event(
-                source="alpaca",
-                asset_class="equity",
-                symbol=t["S"],
-                price=float(t["p"]),
-                size=float(t["s"]),
-                event_ts=iso_to_ms(t["t"]),
-                ingest_ts=ingest_ts,
-                trade_id=str(t["i"]),
-                venue=t.get("x"),
-                conditions=list(t["c"]) if t.get("c") else None,
-            )
-        )
+        try:
+            if t.get("T") != "t":
+                continue
+            events.append(_alpaca_trade(t, ingest_ts))
+        except PARSE_ERRORS as exc:
+            _skip("alpaca", t, exc)
     return events
+
+
+def _alpaca_trade(t: dict, ingest_ts: int) -> dict:
+    return build_event(
+        source="alpaca",
+        asset_class="equity",
+        symbol=t["S"],
+        price=float(t["p"]),
+        size=float(t["s"]),
+        event_ts=iso_to_ms(t["t"]),
+        ingest_ts=ingest_ts,
+        trade_id=str(t["i"]),
+        venue=t.get("x"),
+        conditions=list(t["c"]) if t.get("c") else None,
+    )
 
 
 def parse_coinbase(msg: dict[str, Any], ingest_ts: int) -> list[dict]:
@@ -67,20 +126,25 @@ def parse_coinbase(msg: dict[str, Any], ingest_ts: int) -> list[dict]:
     events = []
     for ev in msg.get("events") or []:
         for t in ev.get("trades") or []:
-            events.append(
-                build_event(
-                    source="coinbase",
-                    asset_class="crypto",
-                    symbol=t["product_id"],
-                    price=float(t["price"]),
-                    size=float(t["size"]),
-                    event_ts=iso_to_ms(t["time"]),
-                    ingest_ts=ingest_ts,
-                    trade_id=str(t["trade_id"]),
-                    venue="coinbase",
-                )
-            )
+            try:
+                events.append(_coinbase_trade(t, ingest_ts))
+            except PARSE_ERRORS as exc:
+                _skip("coinbase", t, exc)
     return events
+
+
+def _coinbase_trade(t: dict, ingest_ts: int) -> dict:
+    return build_event(
+        source="coinbase",
+        asset_class="crypto",
+        symbol=t["product_id"],
+        price=float(t["price"]),
+        size=float(t["size"]),
+        event_ts=iso_to_ms(t["time"]),
+        ingest_ts=ingest_ts,
+        trade_id=str(t["trade_id"]),
+        venue="coinbase",
+    )
 
 
 PARSERS = {"finnhub": parse_finnhub, "alpaca": parse_alpaca, "coinbase": parse_coinbase}
