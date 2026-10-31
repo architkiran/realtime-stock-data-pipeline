@@ -1,9 +1,12 @@
-"""Run the whole pipeline on a laptop against mocked AWS (moto). No AWS account, no bill.
+"""Run the whole pipeline on a laptop against in-memory AWS fakes. No AWS account, no bill.
+
+Kinesis and S3 are small in-memory fakes (fake_kinesis.py, fake_s3.py) because moto slows down
+quadratically on month-long simulations; pass --moto to use moto's S3 instead.
 
     python -m stockstream.local.run_local --start 2026-09-21 --days 30 --scale 1.0 --out local_output
 
 Flow per simulated 5-minute step:
-  simulator -> native wire messages -> parsers -> KinesisSink -> (mock) Kinesis
+  simulator -> native wire messages -> parsers -> KinesisSink -> (fake) Kinesis
   Kinesis -> "Firehose" copy into bronze   (arrival-time partitions, untouched)
   Kinesis -> lambda_handler               (silver + quarantine)
 Then: the hourly job every hour, the daily job and DQ checks every day, and
@@ -113,22 +116,28 @@ class LocalPipeline:
                 run_hourly(self.s3, self.bucket, step_start + timedelta(minutes=STEP_MIN + 10))
 
 
-def run(first_day: date, days: int, scale: float, out: Path, seed: int = 7) -> dict:
+def run(first_day: date, days: int, scale: float, out: Path, seed: int = 7, use_moto: bool = False) -> dict:
+    """use_moto=True runs against moto's S3 (closer to AWS, but slow once the lake is large)."""
     _setup_env()
+    import contextlib
+
     import boto3
     from moto import mock_aws
 
     from stockstream.aggregations.jobs import run_daily, run_hourly
     from stockstream.common.storage import list_keys
     from stockstream.dq.checks import run_dq
+    from stockstream.local.fake_kinesis import FakeKinesis
     from stockstream.local.simulator import default_sims
 
     bucket = os.environ["DATA_BUCKET"]
     t0 = time.time()
     daily_rows, dq = 0, None
-    with mock_aws():
-        s3 = boto3.client("s3", region_name="us-east-1")
-        pipe = LocalPipeline(s3, boto3.client("kinesis", region_name="us-east-1"), bucket,
+    from stockstream.local.fake_s3 import FakeS3
+
+    with mock_aws() if use_moto else contextlib.nullcontext():
+        s3 = boto3.client("s3", region_name="us-east-1") if use_moto else FakeS3()
+        pipe = LocalPipeline(s3, FakeKinesis(), bucket,
                              default_sims(scale), np.random.default_rng(seed))
         for d in range(days):
             day = first_day + timedelta(days=d)
@@ -159,8 +168,10 @@ def main() -> None:
     p.add_argument("--days", type=int, default=1)
     p.add_argument("--scale", type=float, default=1.0)
     p.add_argument("--out", type=Path, default=Path("local_output"))
+    p.add_argument("--moto", action="store_true", help="use moto S3 instead of the in-memory fake")
     args = p.parse_args()
-    print(json.dumps(run(args.start, args.days, args.scale, args.out), indent=2, default=str))
+    result = run(args.start, args.days, args.scale, args.out, use_moto=args.moto)
+    print(json.dumps(result, indent=2, default=str))
 
 
 if __name__ == "__main__":
